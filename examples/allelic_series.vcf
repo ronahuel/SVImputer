@@ -1,0 +1,15 @@
+##fileformat=VCFv4.2
+##contig=<ID=demo1,length=10000>
+##contig=<ID=demo2,length=10000>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Structural variant type">
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description="Length per alternate allele">
+##INFO=<ID=END,Number=1,Type=Integer,Description="End of interval">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+demo1	100	snpA	A	G	.	.	.
+demo1	200	ins1	A	ATC	.	.	SVTYPE=INS
+demo1	200	ins2	A	AGACA	.	.	SVTYPE=INS
+demo1	300	del1	A	<DEL>	.	.	SVTYPE=DEL;SVLEN=-75;END=375
+demo1	400	ins3	C	CTT,CTGGC,CGCCAAC	.	.	SVTYPE=INS
+demo1	500	inv1	A	<INV>	.	.	SVTYPE=INV;END=650
+demo2	200	dup1	G	<DUP>	.	.	SVTYPE=DUP;SVLEN=220;END=420
+demo2	700	bnd1	T	T]demo1:900]	.	.	SVTYPE=BND

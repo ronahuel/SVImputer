@@ -1,0 +1,13 @@
+##fileformat=VCFv4.2
+##contig=<ID=A,length=100000>
+##contig=<ID=B,length=100000>
+##contig=<ID=C,length=100000>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Structural variant type">
+##INFO=<ID=END,Number=1,Type=Integer,Description="End of variant">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Called genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	new01	new02
+A	10	ldA1	A	C	.	.	.	GT	0/0	0/1
+A	20	ldA2	C	A	.	.	.	GT	0/1	1/1
+A	30	ldA3	A	C	.	.	.	GT	0/1	0/1
+A	40	ldA4	A	C	.	.	.	GT	0/0	0/1
+B	50	ldB1	A	C	.	.	.	GT	0/0	0/1
