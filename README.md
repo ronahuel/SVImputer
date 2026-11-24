@@ -30,8 +30,23 @@ sv-impute --reference referencia.vcf.gz --ld-panel-bim panel_LD.bim --out result
 - **Referencia.** VCF ordenado por cromosoma y posición, con SNPs y SVs juntos y genotipos diploides en `FORMAT/GT`. Se aceptan llamadas faseadas o sin fase.
 - **`--ld-panel-vcf`** acepta un panel de SNPs en VCF con solo sitios o con genotipos. Si contiene animales adicionales con GT, también se predicen sus dosages. `--ld` sigue disponible como alias.
 - **`--ld-panel-bim`** acepta un mapa PLINK de texto (`.bim` o `.bim.gz`). Para validar con los animales del VCF de referencia basta el BIM. El mapa identifica los SNPs y el programa toma sus genotipos del VCF de referencia. Elige una sola opción de panel por corrida.
-- Las columnas del mapa son `CHR ID cM BP A1 A2` (también se admite omitir cM). El emparejamiento usa el cromosoma, la posición física BP y ambos alelos en cualquier orden. Un alelo ausente (`0` o `.`) permite usar la posición y el alelo conocido si identifican un único SNP. El informe `ld_matches.tsv` conserva la fila y el motivo si hay discrepancia o ambigüedad. [Formato BIM de PLINK](https://www.cog-genomics.org/plink/1.9/formats#bim)
-- Usa el mismo ensamblaje y los mismos nombres de cromosoma en ambos archivos. Se admite VCF de texto o comprimido con **bgzip**. La lectura es secuencial, por lo que el índice es opcional.
+- El cruce usa únicamente **cromosoma y posición física (BP)**. Con un BIM, los genotipos proceden del VCF de referencia. Los IDs y las columnas A1/A2 pueden diferir o estar invertidos. Las columnas esperadas son `CHR ID [cM] BP A1 A2`. [Formato BIM de PLINK](https://www.cog-genomics.org/plink/1.9/formats#bim)
+- Usa coordenadas del mismo ensamblaje. El programa reconoce etiquetas numéricas equivalentes, como `21` y `chr21`, si son inequívocas. Para otras etiquetas, usa `--chrom-map PANEL=REFERENCIA`. Puedes repetir la opción. `--chromosome` usa la etiqueta de la referencia. Se admite VCF de texto o comprimido con bgzip y lectura secuencial sin índice.
+
+Para conocer el pool antes de ajustar modelos:
+
+```bash
+sv-impute --reference referencia.vcf.gz --ld-panel-bim panel_LD.bim --overlap-only --out cruce
+```
+
+La terminal y `ld_overlap.tsv` muestran cuántas posiciones de SNP son comunes y cuántas aportan un predictor por cromosoma. Si los cromosomas tienen nombres distintos, `chromosome_candidates.tsv` cuenta las coincidencias de posición entre etiquetas sin resolver. Comprueba la correspondencia en el ensamblaje antes de aplicarla. Por ejemplo, si `7` corresponde al contig `A`:
+
+```bash
+sv-impute --reference examples/reference.vcf --ld-panel-bim examples/ld_alias.bim \
+  --chrom-map 7=A --chromosome A --targets sv --neighbors 1 2 4 --out demo_posicional
+```
+
+Una posición repetida en el panel aporta como máximo un predictor. Las posiciones con varios SNPs de referencia o con un SNP multialélico cuentan como compartidas y quedan identificadas en `ld_matches.tsv`. El modelo actual necesita un único dosage de SNP bialélico por posición. La validación usa los genotipos de referencia. Cuando un VCF LD incluye individuos adicionales, los alelos permiten orientar sus dosages después del cruce: se usa `2 − dosage` si están invertidos y se registra un valor ausente si la orientación es indeterminada.
 
 Para comparar ambos formatos con el panel sintético incluido, ejecuta:
 
@@ -67,7 +82,7 @@ Abre **`accuracy_by_neighbors.png`**. El eje horizontal muestra el máximo de SN
 
 **Selección de vecinos.** Se prueban por defecto 1, 2, 4, 8, 16, 32, 64 y 128 SNPs del mismo cromosoma. Si un cromosoma tiene menos SNPs se usan los disponibles. Los tamaños por encima del máximo del panel quedan representados por ese máximo. En `neighbors.tsv.gz`, los primeros `k` SNPs son los de esa ventana. A igual distancia se toma primero el de menor posición. Un SNP en la posición objetivo nunca sirve de predictor para ese locus.
 
-**Variantes.** Por defecto se evalúan las SVs (anotadas con `SVTYPE`, simbólicas o breakends) y los indels de secuencia de cualquier longitud. Usa `--targets sv` para las SVs identificables por anotación/representación, `--targets snp` para los SNPs ajenos al panel o `--targets all` para todas las variantes objetivo. Los SNPs LD se emparejan por cromosoma, posición y alelos. Si REF y ALT están invertidos, se reorientan los dosages del panel. Las ausencias, discrepancias y ambigüedades quedan en `ld_matches.tsv`.
+**Variantes.** Por defecto se evalúan las SVs (anotadas con `SVTYPE`, simbólicas o breakends) y los indels de secuencia de cualquier longitud. Usa `--targets sv` para las SVs identificables por anotación o representación, `--targets snp` para los SNPs ajenos al panel o `--targets all` para todos los tipos de objetivo. Cada fila del panel conserva su estado en `ld_matches.tsv`.
 
 **Validación.** Todos los tamaños comparten las mismas particiones. Ridge selecciona la penalización por alelo en los folds internos (3 por defecto). Los externos (5 por defecto) generan una predicción fuera de muestra por animal en cada repetición. La media y la escala de los SNPs se aprenden en el entrenamiento. En los loci multialélicos, la suma de dosages ALT se limita a dos copias. Las llamadas incompatibles quedan identificadas. Si un animal carece de todos sus SNPs locales, su dosage se registra como ausente. No se aplican filtros de MAF, calidad, LD ni precisión.
 

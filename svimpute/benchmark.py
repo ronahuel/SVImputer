@@ -36,25 +36,69 @@ def dosage_row(values):
 def evaluate(args, out):
     panel_format = "bim" if args.ld_panel_bim else "vcf"
     panel_path = args.ld_panel_bim or args.ld_panel_vcf
-    profile = ReferenceProfile(out / "reference_profile")
+    profile = None if args.overlap_only else ReferenceProfile(out / "reference_profile")
+    candidates = Counter() if args.overlap_only else None
     names, new_names, markers, usable, counts = match_panel(args.reference, panel_path, args.chromosome,
-                                                            panel_format, profile=profile)
-    profile.save()
+                                                            panel_format, profile=profile, aliases=args.chrom_map,
+                                                            candidate_counts=candidates)
+    if profile is not None:
+        profile.save()
     panels = Counter(m.chrom for m in markers)
     chroms = sorted(set(counts) | set(panels) | set(args.chromosome or []))
-    split_sets = folds(args, names)
-    (out / "splits.json").write_text(json.dumps({"sample_ids": names, "repeats": split_sets}))
+    common_fields = ["panel_chrom", "position_found", "reference_snps_at_position", "reference_id"]
+    def details(m):
+        return dict(panel_chrom=m.panel_chrom, position_found=m.position_found, reference_snps_at_position=m.reference_snps,
+                    reference_id=m.reference_id if m.status == "MATCHED" else "")
     if panel_format == "bim":
         write_tsv(out / "ld_matches.tsv",
                   (dict(chrom=m.chrom, pos=m.pos, id=m.marker_id, a1=m.alt, a2=m.ref, status=m.status,
                         reference_ref=m.reference_pair[0] if m.status == "MATCHED" else "",
-                        reference_alt=m.reference_pair[1] if m.status == "MATCHED" else "") for m in markers),
-                  ["chrom", "pos", "id", "a1", "a2", "status", "reference_ref", "reference_alt"])
+                        reference_alt=m.reference_pair[1] if m.status == "MATCHED" else "", **details(m)) for m in markers),
+                  ["chrom", "pos", "id", "a1", "a2", "status", "reference_ref", "reference_alt", *common_fields])
     else:
         write_tsv(out / "ld_matches.tsv",
                   (dict(chrom=m.chrom, pos=m.pos, ref=m.ref, alt=m.alt, status=m.status,
-                        reversed_alleles=m.flipped) for m in markers),
-                  ["chrom", "pos", "ref", "alt", "status", "reversed_alleles"])
+                        reversed_alleles=m.flipped, allele_orientation=m.allele_orientation,
+                        id=m.marker_id, **details(m)) for m in markers),
+                  ["chrom", "pos", "ref", "alt", "status", "reversed_alleles", "allele_orientation", "id", *common_fields])
+    overlap = {}
+    common_positions = set()
+    per_panel_positions = set()
+    for m in markers:
+        cell = overlap.setdefault((m.panel_chrom, m.chrom), Counter())
+        cell["panel_rows"] += 1
+        cell["position_found"] += m.position_found
+        key = (m.panel_chrom, m.chrom, m.pos)
+        cell["shared_snp_positions"] += int(m.reference_snps > 0 and key not in per_panel_positions)
+        if m.reference_snps:
+            common_positions.add((m.chrom, m.pos))
+            per_panel_positions.add(key)
+        cell["matched_snps"] += m.status == "MATCHED"
+    fields = ["panel_chrom", "reference_chrom", "panel_rows", "position_found", "shared_snp_positions", "matched_snps"]
+    write_tsv(out / "ld_overlap.tsv",
+              (dict(panel_chrom=p, reference_chrom=c if c in counts else "", **cell)
+               for (p,c), cell in sorted(overlap.items())), fields)
+    matched = sum(map(len, usable.values()))
+    print(f"LD overlap: {len(common_positions)} shared SNP positions; {matched} usable predictors "
+          f"from {len(markers)} panel rows in scope.", flush=True)
+    for (p,c), cell in sorted(overlap.items()):
+        if c in counts:
+            print(f"  {p} -> {c}: {cell['shared_snp_positions']} shared, {cell['matched_snps']} predictors, "
+                  f"{cell['panel_rows']} panel rows", flush=True)
+    shared = dict(match_by="position", shared_snp_positions=len(common_positions), matched_ld_snps=matched,
+                  ld_panel_rows_in_scope=len(markers), chrom_map=args.chrom_map or [],
+                  reference=args.reference, ld=panel_path, ld_panel_format=panel_format, reference_samples=len(names))
+    if args.overlap_only:
+        # BP coincidences also occur between unrelated chromosomes. The table is
+        # evidence for resolving unknown labels, never an automatic mapping.
+        fields = ["panel_chrom", "candidate_reference_chrom", "coincident_snp_positions"]
+        write_tsv(out / "chromosome_candidates.tsv",
+                  (dict(zip(fields, [p, c, n])) for (p, c), n in candidates.most_common() if p not in counts), fields)
+        report = dict(**shared, state="OVERLAP_ONLY", chromosomes=args.chromosome)
+        (out / "run.json").write_text(json.dumps(report, indent=2) + "\n")
+        return report
+    split_sets = folds(args, names)
+    (out / "splits.json").write_text(json.dumps({"sample_ids": names, "repeats": split_sets}))
     maximum = max(map(len, usable.values()), default=0)
     # Above this maximum all chromosomes use exactly the same features.
     grid = sorted({min(k, maximum) if maximum else k for k in args.neighbors})
@@ -138,12 +182,11 @@ def evaluate(args, out):
     write_tsv(out / "window_accuracy.tsv", rows, fields)
     best = [r["k"] for r in rows if r["scope"] == "genome" and r["best"]]
     plot(rows, out / "accuracy_by_neighbors.png")
-    report = dict(reference=args.reference, ld=panel_path, ld_panel_format=panel_format,
-                  reference_samples=len(names), new_samples=len(new_names),
+    report = dict(**shared, new_samples=len(new_names),
                   targets=args.targets, requested_neighbors=args.neighbors, evaluated_caps=grid,
                   outer_folds=args.outer_folds, inner_folds=args.inner_folds, repeats=args.repeats,
                   seed=args.seed, alphas=ALPHAS.tolist(), chromosomes=args.chromosome, threads=args.threads,
-                  target_loci=sum(target_counts.values()), matched_ld_snps=sum(map(len, usable.values())),
+                  target_loci=sum(target_counts.values()),
                   best_caps=best, state="COMPLETE" if best else "NO_COMPARABLE_ACCURACY")
     (out / "run.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
@@ -168,6 +211,9 @@ def run(args, *, describe_only=False):
         payload.rename(out)
     if describe_only:
         print(f"Reference profile: {out}")
+        return report
+    if args.overlap_only:
+        print(f"Per-chromosome and per-marker results: {out}")
         return report
     print(f"{report['target_loci']} target loci; {report['matched_ld_snps']} matched LD SNPs.")
     best = ", ".join(map(str, report["best_caps"])) or "undefined"

@@ -2,6 +2,7 @@
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 import gzip
+import re
 from itertools import groupby
 
 import numpy as np
@@ -56,21 +57,62 @@ class Marker:
     flipped: bool = False
     marker_id: str = "."
     reference_pair: tuple = ()
+    panel_chrom: str = ""
+    reference_id: str = "."
+    position_found: bool = False
+    reference_snps: int = 0
+    allele_orientation: str = "NOT_APPLICABLE"
 
 
-def read_panel_vcf(ld_panel, reference_ids, chromosomes):
+def chromosome_resolver(contigs, aliases):
+    """Map panel labels to reference labels; exact matches precede numeric aliases."""
+    names = set(contigs)
+    numeric = defaultdict(list)
+    def number(name):
+        match = re.fullmatch(r"(?:chr)?([0-9]+)", name, re.IGNORECASE)
+        return int(match[1]) if match else None
+
+    for name in names:
+        if number(name) is not None:
+            numeric[number(name)].append(name)
+    overrides = {}
+    for spec in aliases or ():
+        panel, sep, reference = spec.partition("=")
+        if not sep or not panel or not reference or "=" in reference:
+            raise ValueError("--chrom-map expects PANEL=REFERENCE.")
+        if names and reference not in names:
+            raise ValueError(f"Unknown reference contig in --chrom-map: {reference}")
+        if panel in overrides and overrides[panel] != reference:
+            raise ValueError(f"Conflicting --chrom-map entries for {panel}")
+        overrides[panel] = reference
+
+    def resolve(label):
+        if label in overrides:
+            return overrides[label]
+        if label in names:
+            return label
+        candidates = numeric.get(number(label), ())
+        return candidates[0] if len(candidates) == 1 else label
+    return resolve
+
+
+def read_panel_vcf(ld_panel, reference_ids, chromosomes, resolve=str):
     markers = []
     reference_set = set(reference_ids)
     with pysam.VariantFile(str(ld_panel)) as src:
         new_ids = [s for s in src.header.samples if s not in reference_set]
         for r in src:
-            if chromosomes and r.contig not in chromosomes:
+            chrom = resolve(r.contig)
+            if chromosomes and chrom not in chromosomes:
                 continue
-            m = Marker(r.contig, r.pos, r.ref, ",".join(r.alts or ()), "ABSENT_IN_REFERENCE")
+            m = Marker(chrom, r.pos, r.ref, ",".join(r.alts or ()), "ABSENT_IN_REFERENCE", panel_chrom=r.contig)
             m.marker_id = r.id or "."
             markers.append(m)
-            if kind(r) != "snp" or len(r.alts) != 1:
-                m.status = "LD_RECORD_REQUIRES_BIALLELIC_SNP"
+            if kind(r) != "snp":
+                m.status = "LD_RECORD_REQUIRES_SNP"
+                continue
+            if len(r.alts) != 1:
+                m.new_calls = np.full(len(new_ids), np.nan)
                 continue
             values, states = calls(r, new_ids)
             if states & {"NON_DIPLOID_GT_UNSUPPORTED", "GT_ALLELE_INDEX_OUT_OF_RANGE"}:
@@ -79,7 +121,7 @@ def read_panel_vcf(ld_panel, reference_ids, chromosomes):
     return new_ids, markers
 
 
-def read_panel_bim(path, chromosomes):
+def read_panel_bim(path, chromosomes, resolve=str):
     markers = []
     opener = gzip.open if str(path).lower().endswith(".gz") else open
     with opener(path, "rt", encoding="utf-8-sig") as stream:
@@ -90,6 +132,7 @@ def read_panel_bim(path, chromosomes):
             if len(fields) not in (5, 6):
                 raise ValueError(f"{path}, line {line_number}: expected CHR ID [cM] BP A1 A2.")
             chrom, marker_id = fields[:2]
+            panel_chrom, chrom = chrom, resolve(chrom)
             bp, a1, a2 = fields[-3:]
             if chromosomes and chrom not in chromosomes:
                 continue
@@ -101,23 +144,22 @@ def read_panel_bim(path, chromosomes):
             status = "ABSENT_IN_REFERENCE"
             if pos < 1:
                 status = "BIM_POSITION_UNAVAILABLE"
-            elif any(a not in {"A", "C", "G", "T", "0", "."} for a in (a1, a2)):
-                status = "LD_RECORD_REQUIRES_BIALLELIC_SNP"
-            elif a1 == a2 and a1 not in ("0", "."):
-                status = "BIM_IDENTICAL_ALLELES"
-            markers.append(Marker(chrom, pos, a2, a1, status, new_calls=np.empty(0), marker_id=marker_id))
+            markers.append(Marker(chrom, pos, a2, a1, status, new_calls=np.empty(0),
+                                  marker_id=marker_id, panel_chrom=panel_chrom))
     return [], markers
 
 
-def match_panel(reference, ld_panel, chromosomes, panel_format="vcf", profile=None):
+def match_panel(reference, ld_panel, chromosomes, panel_format="vcf", profile=None, aliases=None,
+                candidate_counts=None):
     with pysam.VariantFile(str(reference)) as src:
         reference_ids = list(src.header.samples)
+        resolve = chromosome_resolver(src.header.contigs, aliases)
     if not reference_ids:
         raise ValueError("The mixed reference VCF needs samples with called GT.")
     if panel_format == "bim":
-        new_ids, markers = read_panel_bim(ld_panel, chromosomes)
+        new_ids, markers = read_panel_bim(ld_panel, chromosomes, resolve)
     elif panel_format == "vcf":
-        new_ids, markers = read_panel_vcf(ld_panel, reference_ids, chromosomes)
+        new_ids, markers = read_panel_vcf(ld_panel, reference_ids, chromosomes, resolve)
     else:
         raise ValueError(f"Unknown LD panel format: {panel_format}")
     by_site = defaultdict(list)
@@ -125,6 +167,11 @@ def match_panel(reference, ld_panel, chromosomes, panel_format="vcf", profile=No
         if m.status == "ABSENT_IN_REFERENCE":
             by_site[m.chrom, m.pos].append(m)
     counts_by_chrom = defaultdict(Counter)
+    labels_by_pos = defaultdict(set)
+    if candidate_counts is not None:
+        for (chrom, pos), candidates in by_site.items():
+            labels_by_pos[pos].update(m.panel_chrom for m in candidates if m.panel_chrom == chrom)
+    last_snp = None
     with pysam.VariantFile(str(reference)) as src:
         stream = profile.scan(src, chromosomes) if profile is not None else src
         for r in stream:
@@ -132,42 +179,65 @@ def match_panel(reference, ld_panel, chromosomes, panel_format="vcf", profile=No
                 continue
             category = kind(r)
             counts_by_chrom[r.contig][category] += 1
+            if candidate_counts is not None and category == "snp" and last_snp != (r.contig, r.pos):
+                for label in labels_by_pos.get(r.pos, ()):
+                    if label != r.contig:
+                        candidate_counts[label, r.contig] += 1
+                last_snp = (r.contig, r.pos)
             candidates = by_site.get((r.contig, r.pos), ())
             for m in candidates:
-                # BIM allele order is arbitrary. A missing allele supplies no matching constraint.
-                alleles = {m.ref, m.alt}
-                ref_alleles = {r.ref, *(r.alts or ())}
-                if panel_format == "bim":
-                    matches = (alleles - {"0", "."}).issubset(ref_alleles)
-                else:
-                    matches = alleles == ref_alleles
-                if category != "snp" or len(r.alts) != 1 or not matches:
-                    if m.status == "ABSENT_IN_REFERENCE":
-                        m.status = "ALLELE_MISMATCH"
+                m.position_found = True
+                if category != "snp":
+                    if not m.reference_snps:
+                        m.status = "NO_REFERENCE_SNP_AT_POSITION"
                     continue
-                if m.status not in ("ABSENT_IN_REFERENCE", "ALLELE_MISMATCH"):
+                m.reference_snps += 1
+                if m.reference_snps > 1:
                     m.status = "AMBIGUOUS_REFERENCE_MATCH"
+                    continue
+                if len(r.alts) != 1:
+                    m.status = "MULTIALLELIC_REFERENCE_SNP"
                     continue
                 values, states = calls(r, reference_ids)
                 if states & {"NON_DIPLOID_GT_UNSUPPORTED", "GT_ALLELE_INDEX_OUT_OF_RANGE"}:
                     m.status = "UNSUPPORTED_REFERENCE_SNP_GT"
                     continue
                 m.reference_pair = (r.ref, r.alts[0])
-                m.flipped = panel_format == "vcf" and r.ref != m.ref
+                m.reference_id = r.id or "."
                 m.ref_calls = values[:, 0]
-                if m.flipped:
-                    m.new_calls = 2 - m.new_calls
+                # Alleles only orient new-sample genotypes after the position matches.
+                if panel_format == "vcf":
+                    if (m.ref, m.alt) == m.reference_pair:
+                        m.allele_orientation = "SAME"
+                    elif (m.alt, m.ref) == m.reference_pair:
+                        m.flipped = True
+                        m.allele_orientation = "REVERSED"
+                        m.new_calls = 2 - m.new_calls
+                    else:
+                        m.allele_orientation = "UNRESOLVED_NEW_SAMPLE_DOSAGE"
+                        m.new_calls[:] = np.nan
                 m.status = "MATCHED"
     usable = defaultdict(list)
     for site, candidates in by_site.items():
         matched = [m for m in candidates if m.status == "MATCHED"]
-        if len(matched) > 1:
-            for m in matched:
-                m.status = "AMBIGUOUS_LD_POSITION"
-        elif matched:
-            usable[site[0]].append(matched[0])
+        if matched:
+            first = matched[0]
+            conflicts = np.zeros(len(first.new_calls), dtype=bool)
+            for m in matched[1:]:
+                m.status = "DUPLICATE_LD_POSITION"
+                both = np.isfinite(first.new_calls) & np.isfinite(m.new_calls)
+                conflicts |= both & (first.new_calls != m.new_calls)
+                missing = ~np.isfinite(first.new_calls)
+                first.new_calls[missing] = m.new_calls[missing]
+            if conflicts.any():
+                first.allele_orientation = "DISCORDANT_DUPLICATE_LD_CALLS"
+                first.new_calls[conflicts] = np.nan
+            usable[site[0]].append(first)
     for group in usable.values():
         group.sort(key=lambda m: m.pos)
+    for m in markers:
+        if m.status == "ABSENT_IN_REFERENCE" and m.chrom not in counts_by_chrom:
+            m.status = "NO_REFERENCE_RECORDS_ON_CONTIG"
     return reference_ids, new_ids, markers, usable, counts_by_chrom
 
 

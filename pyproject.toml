@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sv-impute-framework"
-version = "0.4.0"
+version = "0.5.0"
 description = "VCF-based per-allele ridge imputation with nested validation and diploid dosage compatibility"
 requires-python = ">=3.9"
 dependencies = ["numpy>=1.22", "pysam>=0.21", "matplotlib>=3.5"]

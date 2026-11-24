@@ -301,6 +301,8 @@ def main(argv=None):
         return legacy_main(argv)
     parser = argparse.ArgumentParser(description="Predict ALT dosages from local SNPs in a user-defined LD panel.",
                                      epilog="For a reference-only report, use sv-impute describe --help.")
+    from . import __version__
+    parser.add_argument("--version", action="version", version=f"SVImputer {__version__}")
     parser.add_argument("--reference", required=True, help="Mixed, coordinate-sorted VCF with called SNP and SV genotypes")
     panel = parser.add_mutually_exclusive_group(required=True)
     panel.add_argument("--ld-panel-vcf", "--ld", metavar="VCF",
@@ -308,6 +310,10 @@ def main(argv=None):
     panel.add_argument("--ld-panel-bim", metavar="BIM",
                        help="PLINK variant map defining LD SNPs for validation in the reference samples")
     parser.add_argument("--out", required=True, help="New results directory")
+    parser.add_argument("--chrom-map", action="append", metavar="PANEL=REFERENCE",
+                        help="Chromosome label correspondence in the same assembly; repeat for additional contigs")
+    parser.add_argument("--overlap-only", action="store_true",
+                        help="Report the shared LD SNP pool and per-marker reasons, then stop before model fitting")
     parser.add_argument("--neighbors", type=int, nargs="+", default=[1, 2, 4, 8, 16, 32, 64, 128],
                         help="Neighborhood sizes to compare (default: 1 2 4 8 16 32 64 128)")
     parser.add_argument("--targets", choices=["sv-indel", "sv", "snp", "all"], default="sv-indel",

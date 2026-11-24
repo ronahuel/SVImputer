@@ -71,8 +71,9 @@ class MixedInputTests(unittest.TestCase):
         ld.write_text("\n".join(lines) + "\n")
         dest = self.run_cli("other", ld, ["--chromosome", "A", "--targets", "snp"])
         statuses = [r["status"] for r in records(dest / "ld_matches.tsv")]
-        self.assertEqual(statuses.count("AMBIGUOUS_LD_POSITION"), 2)
-        self.assertIn("ALLELE_MISMATCH", statuses)
+        self.assertEqual(statuses.count("DUPLICATE_LD_POSITION"), 2)
+        self.assertIn("UNRESOLVED_NEW_SAMPLE_DOSAGE",
+                      {r["allele_orientation"] for r in records(dest / "ld_matches.tsv")})
         self.assertIn("ABSENT_IN_REFERENCE", statuses)
         for feature in records(dest / "neighbors.tsv.gz"):
             self.assertNotIn(feature["pos"], feature["ld_positions_nearest_first"].split(","))
@@ -137,9 +138,31 @@ class MixedInputTests(unittest.TestCase):
         self.assertEqual(new, [])
         self.assertEqual([m.status for m in markers],
                          ["AMBIGUOUS_REFERENCE_MATCH", "MATCHED", "ABSENT_IN_REFERENCE",
-                          "ALLELE_MISMATCH", "BIM_POSITION_UNAVAILABLE", "AMBIGUOUS_LD_POSITION",
-                          "AMBIGUOUS_LD_POSITION", "MATCHED"])
+                          "MATCHED", "BIM_POSITION_UNAVAILABLE", "MATCHED",
+                          "DUPLICATE_LD_POSITION", "MATCHED"])
         self.assertEqual(usable["A"][0].reference_pair, ("A", "C"))
+
+    def test_position_only_pool_ignores_bim_ids_and_both_alleles(self):
+        inp = self.root / "panel.bim"
+        inp.write_text("7 unused 0 10 T G\n7 other 0 20 0 0\n7 absent 0 999 T A\n")
+        out = self.run_cli("audit", inp, ["--chrom-map", "7=A", "--chromosome", "A", "--overlap-only"],
+                           panel_option="--ld-panel-bim")
+        result = json.loads((out/"run.json").read_text())
+        self.assertEqual((result["shared_snp_positions"], result["matched_ld_snps"]), (2, 2))
+        self.assertFalse((out / "accuracy.tsv.gz").exists())
+        rows = records(out / "ld_matches.tsv")
+        self.assertEqual([(r["panel_chrom"], r["chrom"], r["status"]) for r in rows],
+                         [("7", "A", "MATCHED"), ("7", "A", "MATCHED"), ("7", "A", "ABSENT_IN_REFERENCE")])
+        pending = self.run_cli("unmapped", inp, ["--overlap-only"], panel_option="--ld-panel-bim")
+        self.assertEqual(records(pending/"chromosome_candidates.tsv")[0],
+                         {"panel_chrom":"7", "candidate_reference_chrom":"A", "coincident_snp_positions":"2"})
+        self.assertEqual(json.loads((pending/"run.json").read_text())["matched_ld_snps"], 0)
+
+    def test_automatic_numeric_alias_requires_a_unique_reference_name(self):
+        from svimpute.panel_vcf import chromosome_resolver
+        self.assertEqual(chromosome_resolver(["chr7"], None)("07"), "chr7")
+        self.assertEqual(chromosome_resolver(["chr7", "7"], None)("07"), "07")
+        self.assertEqual(chromosome_resolver(["chr7", "7"], None)("7"), "7")
 
     def test_bim_and_vcf_are_mutually_exclusive(self):
         from contextlib import redirect_stderr
